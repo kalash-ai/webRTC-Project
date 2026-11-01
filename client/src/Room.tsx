@@ -1,5 +1,20 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, useState } from 'react';
 import { Inspector } from './Inspector';
+import {
+  ActivityIcon,
+  CameraIcon,
+  CameraOffIcon,
+  ClockIcon,
+  LinkIcon,
+  LockIcon,
+  MaximizeIcon,
+  MicIcon,
+  MicOffIcon,
+  PhoneOffIcon,
+  VideoIcon,
+} from './icons';
+
 const SIGNALING_URL: string = import.meta.env.VITE_SIGNALING_URL ?? 'ws://localhost:8080';
 
 type Status =
@@ -23,7 +38,62 @@ const STATUS_TEXT: Record<Status, string> = {
   error: 'Something went wrong',
 };
 
+// mm:ss counter that runs while the call is connected.
+function useCallTimer(running: boolean): string {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!running) {
+      setSeconds(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+  const m = String(Math.floor(seconds / 60)).padStart(2, '0');
+  const s = String(seconds % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+// True while the other person's audio is loud enough to count as talking.
+function useSpeaking(stream: MediaStream | null): boolean {
+  const [speaking, setSpeaking] = useState(false);
+  useEffect(() => {
+    if (!stream) {
+      setSpeaking(false);
+      return;
+    }
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.fftSize);
+    let lastLoud = 0;
+    const timer = setInterval(() => {
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) {
+        const v = (data[i] - 128) / 128;
+        sum += v * v;
+      }
+      if (Math.sqrt(sum / data.length) > 0.03) lastLoud = Date.now();
+      setSpeaking(Date.now() - lastLoud < 600);
+    }, 200);
+    return () => {
+      clearInterval(timer);
+      source.disconnect();
+      ctx.close();
+      setSpeaking(false);
+    };
+  }, [stream]);
+  return speaking;
+}
+
 export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void }) {
+  const roomRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -34,6 +104,11 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const [camOn, setCamOn] = useState(true);
   const [copied, setCopied] = useState(false);
   const [statsPc, setStatsPc] = useState<RTCPeerConnection | null>(null);
+  const [remoteAudio, setRemoteAudio] = useState<MediaStream | null>(null);
+  const [showStats, setShowStats] = useState(false);
+
+  const timer = useCallTimer(status === 'connected');
+  const speaking = useSpeaking(remoteAudio);
 
   useEffect(() => {
     // Everything lives inside this effect so React StrictMode's
@@ -71,9 +146,9 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
         }
       };
       conn.ontrack = (e) => {
-        if (pc === conn && remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = e.streams[0];
-        }
+        if (pc !== conn) return;
+        if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0];
+        if (e.track.kind === 'audio') setRemoteAudio(new MediaStream([e.track]));
       };
       conn.onconnectionstatechange = () => {
         if (pc !== conn || cancelled) return;
@@ -156,6 +231,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
         }
         case 'peerLeft': {
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+          setRemoteAudio(null);
           createPeerConnection(); // fresh connection, ready for the next person
           setStatus('waiting');
           break;
@@ -257,39 +333,148 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     }
   }
 
+  function toggleFullscreen() {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else roomRef.current?.requestFullscreen();
+  }
+
   const controlsDisabled = status === 'denied' || status === 'full' || status === 'error';
+  const failedHint = 'A strict network or firewall may be blocking the call.';
 
   return (
-    <div className="room">
-      <div className="topbar">
-        <span className={`badge badge-${status}`}>{STATUS_TEXT[status]}</span>
-        {errorText && <span className="error-text">{errorText}</span>}
-      </div>
-
-      <div className="videos">
+    <div className="room" ref={roomRef}>
+      <div className="stage">
         <video ref={remoteVideoRef} className="remote" autoPlay playsInline />
-        {/* Local preview is muted so you never hear your own voice echo. */}
-        <video ref={localVideoRef} className="local" autoPlay playsInline muted />
-      </div>
-  <Inspector pc={statsPc} active={status === 'connected'} />
-      {status === 'waiting' && (
-        <div className="share">
-          <p>Share this link with one other person:</p>
-          <code>{window.location.href}</code>
-          <button onClick={copyLink}>{copied ? 'Copied!' : 'Copy link'}</button>
+
+        <div className="top-left">
+          <span className={`pill pill-status is-${status}`}>
+            <span className="dot" />
+            {STATUS_TEXT[status]}
+          </span>
+          {status === 'connected' && (
+            <span className="pill pill-timer">
+              <ClockIcon size={16} />
+              {timer}
+            </span>
+          )}
         </div>
-      )}
+
+        {document.fullscreenEnabled && (
+          <button className="fs-btn" onClick={toggleFullscreen} aria-label="Toggle fullscreen">
+            <MaximizeIcon size={20} />
+          </button>
+        )}
+
+        {status !== 'connected' && (
+          <div className="overlay">
+            {status === 'waiting' ? (
+              <>
+                <div className="overlay-icon">
+                  <VideoIcon size={28} />
+                </div>
+                <p className="overlay-title">Waiting for someone to join</p>
+                <p className="overlay-sub">Share this link with one other person</p>
+                <div className="share-row">
+                  <LinkIcon size={18} />
+                  <code>{window.location.href}</code>
+                  <button className="btn-secondary small" onClick={copyLink}>
+                    {copied ? 'Copied!' : 'Copy link'}
+                  </button>
+                </div>
+              </>
+            ) : status === 'starting' || status === 'connecting' ? (
+              <>
+                <div className="spinner" />
+                <p className="overlay-title">{STATUS_TEXT[status]}</p>
+              </>
+            ) : (
+              <>
+                <p className="overlay-title">{STATUS_TEXT[status]}</p>
+                <p className="overlay-sub">{status === 'failed' ? failedHint : errorText}</p>
+                <button className="btn-primary small" onClick={onLeave}>
+                  Back to home
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        {status === 'connected' && (
+          <div className="remote-label">
+            <div className="remote-name">Guest</div>
+            {speaking && (
+              <div className="speaking">
+                <span className="bars">
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                Speaking
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="pip">
+          {/* Local preview is muted so you never hear your own voice echo. */}
+          <video ref={localVideoRef} autoPlay playsInline muted />
+          {!camOn && (
+            <div className="pip-off">
+              <CameraOffIcon size={26} />
+            </div>
+          )}
+          <span className="pip-label">You</span>
+        </div>
+
+        {showStats && (
+          <div className="stats-panel">
+            <Inspector pc={statsPc} active={status === 'connected'} />
+          </div>
+        )}
+      </div>
 
       <div className="controls">
-        <button onClick={() => toggleTrack('audio')} disabled={controlsDisabled}>
-          {micOn ? 'Mute' : 'Unmute'}
+        <button
+          className={`ctl ${micOn ? '' : 'is-off'}`}
+          onClick={() => toggleTrack('audio')}
+          disabled={controlsDisabled}
+        >
+          <span className="ctl-icon">{micOn ? <MicIcon size={24} /> : <MicOffIcon size={24} />}</span>
+          <span className="ctl-label">{micOn ? 'Mute' : 'Unmute'}</span>
         </button>
-        <button onClick={() => toggleTrack('video')} disabled={controlsDisabled}>
-          {camOn ? 'Camera off' : 'Camera on'}
+        <button
+          className={`ctl ${camOn ? '' : 'is-off'}`}
+          onClick={() => toggleTrack('video')}
+          disabled={controlsDisabled}
+        >
+          <span className="ctl-icon">
+            {camOn ? <CameraIcon size={24} /> : <CameraOffIcon size={24} />}
+          </span>
+          <span className="ctl-label">Camera</span>
         </button>
-        <button className="leave" onClick={onLeave}>
-          Leave
+        <button
+          className={`ctl ${showStats ? 'is-on' : ''}`}
+          onClick={() => setShowStats((v) => !v)}
+          disabled={status !== 'connected'}
+        >
+          <span className="ctl-icon">
+            <ActivityIcon size={24} />
+          </span>
+          <span className="ctl-label">Stats</span>
         </button>
+        <button className="ctl ctl-leave" onClick={onLeave}>
+          <span className="ctl-icon">
+            <PhoneOffIcon size={24} />
+          </span>
+          <span className="ctl-label">Leave Call</span>
+        </button>
+      </div>
+
+      <div className="room-foot">
+        <LockIcon size={16} />
+        Encrypted peer connection
       </div>
     </div>
   );
