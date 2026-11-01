@@ -1,0 +1,141 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  background: #11141a;
+  color: #e8eaed;
+}
+
+button {
+  font: inherit;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: #2f6feb;
+  color: #fff;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  background: #4a82f0;
+}
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+button.leave {
+  background: #d93025;
+}
+button.leave:hover {
+  background: #e5473d;
+}
+
+.home {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+.home h1 {
+  margin: 0;
+}
+.home p {
+  margin: 0 0 8px;
+  color: #9aa0a6;
+}
+
+.room {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  max-width: 960px;
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.badge {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 14px;
+  background: #3c4043;
+}
+.badge-connected {
+  background: #1e7e34;
+}
+.badge-waiting,
+.badge-connecting,
+.badge-starting {
+  background: #9a6700;
+}
+.badge-failed,
+.badge-error,
+.badge-denied,
+.badge-full {
+  background: #b3261e;
+}
+.error-text {
+  color: #f28b82;
+  font-size: 14px;
+}
+
+.videos {
+  position: relative;
+  flex: 1;
+  min-height: 320px;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+}
+.remote {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+.local {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  width: 28%;
+  max-width: 220px;
+  border-radius: 8px;
+  border: 2px solid #11141a;
+  background: #222;
+  transform: scaleX(-1); /* mirror your own preview, like a mirror */
+}
+
+.share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  background: #1b1f27;
+  border-radius: 8px;
+}
+.share p {
+  margin: 0;
+}
+.share code {
+  word-break: break-all;
+  color: #8ab4f8;
+}
+
+.controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
