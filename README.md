@@ -1,6 +1,6 @@
 # LinkRTC
 
-[Live Deployment: Insert URL Here]
+[Live Deployment: (Project is not deployed yet, still under maintenance)
 
 LinkRTC is a lightweight, strictly peer-to-peer video calling web application built to demonstrate core WebRTC networking concepts. Developed as a technical portfolio project during my first year of B.Tech CSE (AI/ML) at Kalinga Institute of Industrial Technology, it focuses on fundamental real-time communication mechanics without relying on heavy third-party communication SDKs. The application pairs a React frontend with a custom native WebSocket signaling server to negotiate connections.
 
