@@ -139,3 +139,49 @@ button.leave:hover {
   justify-content: center;
   gap: 12px;
 }
+.inspector {
+  background: #1b1f27;
+  border-radius: 8px;
+  padding: 12px;
+}
+.inspector-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.route {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.route-direct {
+  background: #1e7e34;
+}
+.route-relay {
+  background: #9a6700;
+}
+.inspector-hint {
+  font-size: 13px;
+  color: #9aa0a6;
+}
+.inspector-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+.inspector-grid div {
+  background: #11141a;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.inspector-grid b {
+  font-size: 18px;
+}
+.inspector-grid small {
+  display: block;
+  color: #9aa0a6;
+  font-size: 12px;
+}

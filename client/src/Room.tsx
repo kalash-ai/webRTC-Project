@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-
+import { Inspector } from './Inspector';
 const SIGNALING_URL: string = import.meta.env.VITE_SIGNALING_URL ?? 'ws://localhost:8080';
 
 type Status =
@@ -33,6 +33,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [statsPc, setStatsPc] = useState<RTCPeerConnection | null>(null);
 
   useEffect(() => {
     // Everything lives inside this effect so React StrictMode's
@@ -58,6 +59,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
       pc?.close();
       const conn = new RTCPeerConnection({ iceServers });
       pc = conn;
+      setStatsPc(conn);
       remoteDescriptionSet = false;
       pendingCandidates = [];
 
@@ -230,6 +232,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
       ws = null;
       stream = null;
       localStreamRef.current = null;
+      setStatsPc(null);
     };
   }, [roomId]);
 
@@ -268,7 +271,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
         {/* Local preview is muted so you never hear your own voice echo. */}
         <video ref={localVideoRef} className="local" autoPlay playsInline muted />
       </div>
-
+  <Inspector pc={statsPc} active={status === 'connected'} />
       {status === 'waiting' && (
         <div className="share">
           <p>Share this link with one other person:</p>
