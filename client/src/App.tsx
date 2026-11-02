@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Room } from './Room';
+import './index.css';
 import {
   ArrowRightIcon,
   GlobeIcon,
