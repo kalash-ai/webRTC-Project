@@ -132,7 +132,11 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
 
     function createPeerConnection() {
       pc?.close();
-      const conn = new RTCPeerConnection({ iceServers });
+   const forceRelay = new URLSearchParams(window.location.search).get('relay') === '1';
+const conn = new RTCPeerConnection({
+  iceServers,
+  iceTransportPolicy: forceRelay ? 'relay' : 'all',
+});
       pc = conn;
       setStatsPc(conn);
       remoteDescriptionSet = false;
