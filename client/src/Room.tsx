@@ -1,24 +1,41 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { useEffect, useRef, useState } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import { Inspector } from './Inspector';
+import { useAdaptiveQuality } from './useAdaptiveQuality';
 import {
   ActivityIcon,
   CameraIcon,
   CameraOffIcon,
   ClockIcon,
+  CloseIcon,
+  EditIcon,
   LinkIcon,
   LockIcon,
   MaximizeIcon,
+  MessageIcon,
   MicIcon,
   MicOffIcon,
   PhoneOffIcon,
+  SendIcon,
+  SwapIcon,
   VideoIcon,
 } from './icons';
 
 const SIGNALING_URL: string = import.meta.env.VITE_SIGNALING_URL ?? 'ws://localhost:8080';
+const MAX_RECONNECT_ATTEMPTS = 8;
+const SLOW_SERVER_MS = 5000;
+const NAME_KEY = 'linkrtc-name';
 
 type Status =
   | 'starting'
+  | 'joining'
+  | 'reconnecting'
   | 'waiting'
   | 'connecting'
   | 'connected'
@@ -29,6 +46,8 @@ type Status =
 
 const STATUS_TEXT: Record<Status, string> = {
   starting: 'Starting camera...',
+  joining: 'Connecting to the server...',
+  reconnecting: 'Reconnecting to the server...',
   waiting: 'Waiting for the other person',
   connecting: 'Connecting...',
   connected: 'Connected',
@@ -37,6 +56,25 @@ const STATUS_TEXT: Record<Status, string> = {
   denied: 'Camera or microphone unavailable',
   error: 'Something went wrong',
 };
+
+type ChatMessage = { id: number; from: 'me' | 'them'; text: string; time: string };
+type PipRect = { left: number; top: number; width: number };
+type DragState = {
+  mode: 'move' | 'resize';
+  startX: number;
+  startY: number;
+  left: number;
+  top: number;
+  width: number;
+};
+
+function nowTime(): string {
+  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
 
 // mm:ss counter that runs while the call is connected.
 function useCallTimer(running: boolean): string {
@@ -94,12 +132,19 @@ function useSpeaking(stream: MediaStream | null): boolean {
 
 export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void }) {
   const roomRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const channelRef = useRef<RTCDataChannel | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragRef = useRef<DragState | null>(null);
+  const msgSeq = useRef(0);
 
   const [status, setStatus] = useState<Status>('starting');
   const [errorText, setErrorText] = useState('');
+  const [serverSlow, setServerSlow] = useState(false);
   const [micOn, setMicOn] = useState(true);
   const [camOn, setCamOn] = useState(true);
   const [copied, setCopied] = useState(false);
@@ -107,8 +152,38 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const [remoteAudio, setRemoteAudio] = useState<MediaStream | null>(null);
   const [showStats, setShowStats] = useState(false);
 
+  const [myName, setMyName] = useState<string>(() => {
+    try {
+      return localStorage.getItem(NAME_KEY) ?? '';
+    } catch {
+      return '';
+    }
+  });
+  const [remoteName, setRemoteName] = useState('');
+  const [editingName, setEditingName] = useState(false);
+  const myNameRef = useRef(myName);
+  const remoteNameRef = useRef('');
+
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [draft, setDraft] = useState('');
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatReady, setChatReady] = useState(false);
+  const [unread, setUnread] = useState(0);
+  const chatOpenRef = useRef(false);
+
+  const [toast, setToast] = useState<string | null>(null);
+  const [swapped, setSwapped] = useState(false);
+  const [pip, setPip] = useState<PipRect | null>(null);
+
   const timer = useCallTimer(status === 'connected');
   const speaking = useSpeaking(remoteAudio);
+  const quality = useAdaptiveQuality(statsPc, status === 'connected');
+
+  function showToast(text: string) {
+    setToast(text);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  }
 
   useEffect(() => {
     // Everything lives inside this effect so React StrictMode's
@@ -121,6 +196,10 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     let pendingCandidates: RTCIceCandidateInit[] = [];
     let remoteDescriptionSet = false;
     let offerWhenReady = false;
+    let attempts = 0;
+    let stopReconnect = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let slowTimer: ReturnType<typeof setTimeout> | null = null;
     // Messages are handled one at a time, in order, so awaits can't race.
     let queue: Promise<void> = Promise.resolve();
 
@@ -130,13 +209,60 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
       }
     }
 
+    // ----- chat and names travel over a data channel, never through the server -----
+    function resetChat() {
+      channelRef.current = null;
+      remoteNameRef.current = '';
+      setRemoteName('');
+      setMessages([]);
+      setUnread(0);
+      setChatReady(false);
+    }
+
+    function setupChannel(ch: RTCDataChannel) {
+      channelRef.current = ch;
+      ch.onopen = () => {
+        setChatReady(true);
+        if (myNameRef.current) {
+          ch.send(JSON.stringify({ type: 'name', name: myNameRef.current }));
+        }
+      };
+      ch.onclose = () => {
+        if (channelRef.current === ch) {
+          channelRef.current = null;
+          setChatReady(false);
+        }
+      };
+      ch.onmessage = (ev) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (msg && msg.type === 'name' && typeof msg.name === 'string') {
+          const name = msg.name.trim().slice(0, 24);
+          remoteNameRef.current = name;
+          setRemoteName(name);
+        } else if (msg && msg.type === 'chat' && typeof msg.text === 'string') {
+          const text = msg.text.slice(0, 500);
+          setMessages((prev) => [
+            ...prev,
+            { id: ++msgSeq.current, from: 'them', text, time: nowTime() },
+          ]);
+          if (!chatOpenRef.current) setUnread((u) => u + 1);
+        }
+      };
+    }
+
     function createPeerConnection() {
       pc?.close();
-   const forceRelay = new URLSearchParams(window.location.search).get('relay') === '1';
-const conn = new RTCPeerConnection({
-  iceServers,
-  iceTransportPolicy: forceRelay ? 'relay' : 'all',
-});
+      // Test switch: open the site with ?relay=1 to force the call through TURN.
+      const forceRelay = new URLSearchParams(window.location.search).get('relay') === '1';
+      const conn = new RTCPeerConnection({
+        iceServers,
+        iceTransportPolicy: forceRelay ? 'relay' : 'all',
+      });
       pc = conn;
       setStatsPc(conn);
       remoteDescriptionSet = false;
@@ -154,6 +280,10 @@ const conn = new RTCPeerConnection({
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0];
         if (e.track.kind === 'audio') setRemoteAudio(new MediaStream([e.track]));
       };
+      // The person who answers receives the chat channel the offerer created.
+      conn.ondatachannel = (e) => {
+        if (pc === conn) setupChannel(e.channel);
+      };
       conn.onconnectionstatechange = () => {
         if (pc !== conn || cancelled) return;
         if (conn.connectionState === 'connected') setStatus('connected');
@@ -164,6 +294,7 @@ const conn = new RTCPeerConnection({
 
     async function makeOffer() {
       if (!pc) return;
+      setupChannel(pc.createDataChannel('chat'));
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       send({ type: 'createOffer', sdp: pc.localDescription });
@@ -185,7 +316,14 @@ const conn = new RTCPeerConnection({
       if (cancelled) return;
       switch (message.type) {
         case 'joined': {
+          if (slowTimer) clearTimeout(slowTimer);
+          slowTimer = null;
+          setServerSlow(false);
+          attempts = 0;
           iceServers = message.iceServers ?? [];
+          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+          setRemoteAudio(null);
+          resetChat();
           createPeerConnection();
           setStatus(message.peerPresent ? 'connecting' : 'waiting');
           if (offerWhenReady) {
@@ -234,13 +372,18 @@ const conn = new RTCPeerConnection({
           break;
         }
         case 'peerLeft': {
+          showToast(`${remoteNameRef.current || 'Guest'} left the call`);
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
           setRemoteAudio(null);
+          resetChat();
           createPeerConnection(); // fresh connection, ready for the next person
           setStatus('waiting');
           break;
         }
         case 'roomFull': {
+          stopReconnect = true;
+          if (slowTimer) clearTimeout(slowTimer);
+          setServerSlow(false);
           setStatus('full');
           break;
         }
@@ -249,6 +392,61 @@ const conn = new RTCPeerConnection({
           break;
         }
       }
+    }
+
+    function scheduleReconnect() {
+      if (cancelled) return;
+      if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+        if (slowTimer) clearTimeout(slowTimer);
+        setServerSlow(false);
+        setErrorText('Could not reach the signaling server. Check your connection and try again.');
+        setStatus('error');
+        return;
+      }
+      // Wait 1s, 2s, 4s, 8s, then 15s between tries (about 75 seconds in total,
+      // enough for a sleeping free-tier server to wake up).
+      const delay = Math.min(1000 * 2 ** attempts, 15000);
+      attempts += 1;
+      setStatus('reconnecting');
+      reconnectTimer = setTimeout(() => connect(true), delay);
+    }
+
+    function connect(isRetry: boolean) {
+      if (cancelled) return;
+      setStatus(isRetry ? 'reconnecting' : 'joining');
+
+      // If the server has not answered after a few seconds, say why.
+      // The timer starts once and keeps running across retries until we join.
+      if (!slowTimer) {
+        slowTimer = setTimeout(() => {
+          if (!cancelled) setServerSlow(true);
+        }, SLOW_SERVER_MS);
+      }
+
+      const socket = new WebSocket(SIGNALING_URL);
+      ws = socket;
+      socket.onopen = () => send({ type: 'join', roomId });
+      socket.onmessage = (ev) => {
+        let message: any;
+        try {
+          message = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        queue = queue.then(() => handle(message)).catch(console.error);
+      };
+      socket.onclose = (ev) => {
+        if (cancelled || ws !== socket || stopReconnect) return;
+        if (ev.code === 1008) {
+          // The server refused this website (ALLOWED_ORIGINS). Retrying will not help.
+          if (slowTimer) clearTimeout(slowTimer);
+          setServerSlow(false);
+          setErrorText('This website is not allowed to use the signaling server.');
+          setStatus('error');
+          return;
+        }
+        scheduleReconnect();
+      };
     }
 
     async function start() {
@@ -277,34 +475,18 @@ const conn = new RTCPeerConnection({
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
-      ws = new WebSocket(SIGNALING_URL);
-      ws.onopen = () => send({ type: 'join', roomId });
-      ws.onmessage = (ev) => {
-        let message: any;
-        try {
-          message = JSON.parse(ev.data);
-        } catch {
-          return;
-        }
-        queue = queue.then(() => handle(message)).catch(console.error);
-      };
-      ws.onerror = () => {
-        if (cancelled) return;
-        setErrorText('Could not reach the signaling server.');
-        setStatus('error');
-      };
-      ws.onclose = () => {
-        if (cancelled) return;
-        setErrorText((prev) => prev || 'Lost connection to the server.');
-        setStatus((prev) => (prev === 'full' || prev === 'denied' ? prev : 'error'));
-      };
+      connect(false);
     }
 
     start();
 
     return () => {
       cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (slowTimer) clearTimeout(slowTimer);
       send({ type: 'leave' });
+      channelRef.current?.close();
+      channelRef.current = null;
       ws?.close();
       pc?.close();
       stream?.getTracks().forEach((t) => t.stop());
@@ -315,6 +497,30 @@ const conn = new RTCPeerConnection({
       setStatsPc(null);
     };
   }, [roomId]);
+
+  // Swapping only makes sense while both videos are showing.
+  useEffect(() => {
+    if (status !== 'connected') setSwapped(false);
+  }, [status]);
+
+  // A resized window or fullscreen change puts the small video back in its corner.
+  useEffect(() => {
+    const reset = () => setPip(null);
+    window.addEventListener('resize', reset);
+    return () => window.removeEventListener('resize', reset);
+  }, []);
+
+  // Keep the newest chat message in view.
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ block: 'end' });
+  }, [messages, chatOpen]);
+
+  useEffect(
+    () => () => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+    },
+    [],
+  );
 
   function toggleTrack(kind: 'audio' | 'video') {
     const stream = localStreamRef.current;
@@ -342,13 +548,158 @@ const conn = new RTCPeerConnection({
     else roomRef.current?.requestFullscreen();
   }
 
+  function saveName(raw: string) {
+    const name = raw.trim().slice(0, 24);
+    setMyName(name);
+    myNameRef.current = name;
+    try {
+      localStorage.setItem(NAME_KEY, name);
+    } catch {
+      // Storage can be blocked; the name still works for this visit.
+    }
+    const ch = channelRef.current;
+    if (ch && ch.readyState === 'open') {
+      ch.send(JSON.stringify({ type: 'name', name }));
+    }
+    setEditingName(false);
+  }
+
+  function toggleChat() {
+    const next = !chatOpen;
+    setChatOpen(next);
+    chatOpenRef.current = next;
+    if (next) setUnread(0);
+  }
+
+  function sendChat() {
+    const text = draft.trim().slice(0, 500);
+    const ch = channelRef.current;
+    if (!text || !ch || ch.readyState !== 'open') return;
+    ch.send(JSON.stringify({ type: 'chat', text }));
+    setMessages((prev) => [...prev, { id: ++msgSeq.current, from: 'me', text, time: nowTime() }]);
+    setDraft('');
+  }
+
+  // ----- the small video: drag to move, corner handle to resize -----
+  function startDrag(e: ReactPointerEvent, mode: 'move' | 'resize') {
+    const stage = stageRef.current;
+    const tile = stage?.querySelector('.tile.pip') as HTMLElement | null;
+    if (!stage || !tile) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const s = stage.getBoundingClientRect();
+    const t = tile.getBoundingClientRect();
+    const start = { left: t.left - s.left, top: t.top - s.top, width: t.width };
+    setPip(start);
+    dragRef.current = { mode, startX: e.clientX, startY: e.clientY, ...start };
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function onDragMove(e: ReactPointerEvent) {
+    const d = dragRef.current;
+    const stage = stageRef.current;
+    const tile = stage?.querySelector('.tile.pip') as HTMLElement | null;
+    if (!d || !stage || !tile) return;
+    const s = stage.getBoundingClientRect();
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (d.mode === 'move') {
+      const t = tile.getBoundingClientRect();
+      setPip({
+        left: clamp(d.left + dx, 0, s.width - t.width),
+        top: clamp(d.top + dy, 0, s.height - t.height),
+        width: t.width,
+      });
+    } else {
+      const width = clamp(d.width + dx, 120, Math.min(560, s.width - d.left, s.width * 0.7));
+      setPip({ left: d.left, top: d.top, width });
+    }
+  }
+
+  function endDrag() {
+    dragRef.current = null;
+  }
+
+  function pipStyle(isPip: boolean): CSSProperties | undefined {
+    if (!isPip || !pip) return undefined;
+    return { left: pip.left, top: pip.top, width: pip.width, right: 'auto', bottom: 'auto' };
+  }
+
+  function pipHandlers(isPip: boolean) {
+    if (!isPip) return {};
+    return {
+      onPointerDown: (e: ReactPointerEvent) => startDrag(e, 'move'),
+      onPointerMove: onDragMove,
+      onPointerUp: endDrag,
+      onPointerCancel: endDrag,
+    };
+  }
+
+  function pipControls() {
+    return (
+      <>
+        {status === 'connected' && (
+          <button
+            className="pip-swap"
+            aria-label="Swap videos"
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={() => setSwapped((v) => !v)}
+          >
+            <SwapIcon size={16} />
+          </button>
+        )}
+        <div
+          className="pip-resize"
+          onPointerDown={(e) => startDrag(e, 'resize')}
+          onPointerMove={onDragMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+        />
+      </>
+    );
+  }
+
   const controlsDisabled = status === 'denied' || status === 'full' || status === 'error';
+  const isBusy =
+    status === 'starting' ||
+    status === 'joining' ||
+    status === 'reconnecting' ||
+    status === 'connecting';
   const failedHint = 'A strict network or firewall may be blocking the call.';
+  const localLabel = myName ? `${myName} (You)` : 'You';
+  const remoteLabel = remoteName || 'Guest';
+  const remoteIsPip = swapped;
+  const localIsPip = !swapped;
 
   return (
     <div className="room" ref={roomRef}>
-      <div className="stage">
-        <video ref={remoteVideoRef} className="remote" autoPlay playsInline />
+      <div className="stage" ref={stageRef}>
+        {/* The other person's video */}
+        <div
+          className={`tile tile-remote ${remoteIsPip ? 'pip' : 'big'}`}
+          style={pipStyle(remoteIsPip)}
+          {...pipHandlers(remoteIsPip)}
+        >
+          <video ref={remoteVideoRef} autoPlay playsInline />
+          {remoteIsPip && <span className="tile-label">{remoteLabel}</span>}
+          {remoteIsPip && pipControls()}
+        </div>
+
+        {/* Your own video (muted, so you never hear an echo of yourself) */}
+        <div
+          className={`tile tile-local ${localIsPip ? 'pip' : 'big'}`}
+          style={pipStyle(localIsPip)}
+          {...pipHandlers(localIsPip)}
+        >
+          <video ref={localVideoRef} autoPlay playsInline muted />
+          {!camOn && (
+            <div className="pip-off">
+              <CameraOffIcon size={26} />
+            </div>
+          )}
+          <span className="tile-label">{localLabel}</span>
+          {localIsPip && pipControls()}
+        </div>
 
         <div className="top-left">
           <span className={`pill pill-status is-${status}`}>
@@ -361,7 +712,43 @@ const conn = new RTCPeerConnection({
               {timer}
             </span>
           )}
+          {status === 'connected' && quality && (
+            <span className={`pill pill-quality is-${quality}`}>
+              <span className="dot" />
+              {quality === 'good' ? 'Sending: Good' : quality === 'fair' ? 'Sending: Fair' : 'Sending: Weak'}
+            </span>
+          )}
+          {editingName ? (
+            <input
+              className="pill pill-input"
+              autoFocus
+              maxLength={24}
+              defaultValue={myName}
+              placeholder="Your name"
+              onBlur={(e) => saveName(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') saveName(e.currentTarget.value);
+                if (e.key === 'Escape') setEditingName(false);
+              }}
+            />
+          ) : (
+            <button className="pill pill-name" onClick={() => setEditingName(true)}>
+              <EditIcon size={14} />
+              {myName || 'Add your name'}
+            </button>
+          )}
         </div>
+
+        {status === 'connected' && quality === 'poor' && camOn && (
+          <div className="quality-banner">
+            <span>Your connection is weak. Video quality was lowered automatically.</span>
+            <button className="btn-secondary small" onClick={() => toggleTrack('video')}>
+              Switch to audio only
+            </button>
+          </div>
+        )}
+
+        {toast && <div className="toast">{toast}</div>}
 
         {document.fullscreenEnabled && (
           <button className="fs-btn" onClick={toggleFullscreen} aria-label="Toggle fullscreen">
@@ -386,15 +773,25 @@ const conn = new RTCPeerConnection({
                   </button>
                 </div>
               </>
-            ) : status === 'starting' || status === 'connecting' ? (
+            ) : isBusy ? (
               <>
                 <div className="spinner" />
                 <p className="overlay-title">{STATUS_TEXT[status]}</p>
+                {serverSlow && (status === 'joining' || status === 'reconnecting') && (
+                  <p className="overlay-sub">
+                    Waking up the server, this can take up to a minute. The free server sleeps when idle.
+                  </p>
+                )}
               </>
             ) : (
               <>
                 <p className="overlay-title">{STATUS_TEXT[status]}</p>
                 <p className="overlay-sub">{status === 'failed' ? failedHint : errorText}</p>
+                {(status === 'error' || status === 'failed') && (
+                  <button className="btn-secondary small" onClick={() => window.location.reload()}>
+                    Try again
+                  </button>
+                )}
                 <button className="btn-primary small" onClick={onLeave}>
                   Back to home
                 </button>
@@ -403,9 +800,9 @@ const conn = new RTCPeerConnection({
           </div>
         )}
 
-        {status === 'connected' && (
+        {status === 'connected' && !swapped && (
           <div className="remote-label">
-            <div className="remote-name">Guest</div>
+            <div className="remote-name">{remoteLabel}</div>
             {speaking && (
               <div className="speaking">
                 <span className="bars">
@@ -421,20 +818,56 @@ const conn = new RTCPeerConnection({
           </div>
         )}
 
-        <div className="pip">
-          {/* Local preview is muted so you never hear your own voice echo. */}
-          <video ref={localVideoRef} autoPlay playsInline muted />
-          {!camOn && (
-            <div className="pip-off">
-              <CameraOffIcon size={26} />
-            </div>
-          )}
-          <span className="pip-label">You</span>
-        </div>
-
         {showStats && (
           <div className="stats-panel">
             <Inspector pc={statsPc} active={status === 'connected'} />
+          </div>
+        )}
+
+        {chatOpen && (
+          <div className="chat-panel">
+            <div className="chat-head">
+              <span>Chat</span>
+              <button className="chat-close" onClick={toggleChat} aria-label="Close chat">
+                <CloseIcon size={18} />
+              </button>
+            </div>
+            <div className="chat-list">
+              {messages.length === 0 && (
+                <p className="chat-empty">
+                  {chatReady ? 'No messages yet. Say hello.' : 'Chat starts when someone is connected.'}
+                </p>
+              )}
+              {messages.map((m) => (
+                <div key={m.id} className={`msg ${m.from === 'me' ? 'msg-me' : 'msg-them'}`}>
+                  <div className="msg-bubble">{m.text}</div>
+                  <span className="msg-time">
+                    {m.from === 'me' ? 'You' : remoteLabel} · {m.time}
+                  </span>
+                </div>
+              ))}
+              <div ref={chatEndRef} />
+            </div>
+            <div className="chat-input">
+              <input
+                value={draft}
+                maxLength={500}
+                disabled={!chatReady}
+                placeholder={chatReady ? 'Type a message' : 'Waiting for connection...'}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') sendChat();
+                }}
+              />
+              <button
+                className="chat-send"
+                onClick={sendChat}
+                disabled={!chatReady || !draft.trim()}
+                aria-label="Send message"
+              >
+                <SendIcon size={18} />
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -457,6 +890,17 @@ const conn = new RTCPeerConnection({
             {camOn ? <CameraIcon size={24} /> : <CameraOffIcon size={24} />}
           </span>
           <span className="ctl-label">Camera</span>
+        </button>
+        <button
+          className={`ctl ${chatOpen ? 'is-on' : ''}`}
+          onClick={toggleChat}
+          disabled={status !== 'connected' && !chatOpen}
+        >
+          <span className="ctl-icon">
+            <MessageIcon size={24} />
+            {unread > 0 && <span className="ctl-badge">{unread > 9 ? '9+' : unread}</span>}
+          </span>
+          <span className="ctl-label">Chat</span>
         </button>
         <button
           className={`ctl ${showStats ? 'is-on' : ''}`}

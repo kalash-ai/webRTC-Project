@@ -109,3 +109,32 @@ export const PhoneOffIcon = make(
   </>,
 );
 export const ActivityIcon = make(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />);
+export const MessageIcon = make(
+  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
+);
+export const EditIcon = make(
+  <>
+    <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+    <path d="m15 5 4 4" />
+  </>,
+);
+export const SwapIcon = make(
+  <>
+    <path d="m17 2 4 4-4 4" />
+    <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+    <path d="m7 22-4-4 4-4" />
+    <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+  </>,
+);
+export const SendIcon = make(
+  <>
+    <path d="m22 2-7 20-4-9-9-4Z" />
+    <path d="M22 2 11 13" />
+  </>,
+);
+export const CloseIcon = make(
+  <>
+    <path d="M18 6 6 18" />
+    <path d="m6 6 12 12" />
+  </>,
+);
