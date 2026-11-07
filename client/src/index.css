@@ -1047,55 +1047,65 @@ button:disabled {
 }
 .lc-resizer-left {
   left: 0;
-  top: 18px;
-  bottom: 18px;
-  width: 12px;
+  top: 0;
+  bottom: 0;
+  width: 16px;
   cursor: ew-resize;
   display: flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.15s;
+}
+.lc-resizer-left:hover {
+  background: linear-gradient(to right, rgba(123, 108, 246, 0.18), transparent);
 }
 .lc-resizer-grip {
-  width: 3px;
-  height: 38px;
+  width: 4px;
+  height: 48px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.22);
   transition: background 0.15s, transform 0.15s;
 }
 .lc-resizer-left:hover .lc-resizer-grip,
 .lc-panel.is-resizing .lc-resizer-grip {
   background: var(--violet);
-  transform: scaleX(1.8);
+  transform: scaleX(1.75);
 }
 .lc-resizer-top {
   top: 0;
-  left: 24px;
-  right: 24px;
-  height: 10px;
+  left: 20px;
+  right: 20px;
+  height: 14px;
   cursor: ns-resize;
+  transition: background 0.15s;
 }
 .lc-resizer-top:hover,
 .lc-panel.is-resizing .lc-resizer-top {
+  background: linear-gradient(to bottom, rgba(123, 108, 246, 0.22), transparent);
   border-top: 2px solid var(--violet);
 }
 .lc-resizer-corner {
   top: 0;
   left: 0;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   cursor: nwse-resize;
   border-top-left-radius: 24px;
+  transition: background 0.15s;
+}
+.lc-resizer-corner:hover {
+  background: radial-gradient(circle at top left, rgba(123, 108, 246, 0.3), transparent 70%);
 }
 .lc-resizer-corner::after {
   content: '';
   position: absolute;
   top: 7px;
   left: 7px;
-  width: 9px;
-  height: 9px;
-  border-left: 2px solid rgba(255, 255, 255, 0.22);
-  border-top: 2px solid rgba(255, 255, 255, 0.22);
-  border-top-left-radius: 5px;
+  width: 10px;
+  height: 10px;
+  border-left: 2px solid rgba(255, 255, 255, 0.25);
+  border-top: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-left-radius: 6px;
   transition: border-color 0.15s;
 }
 .lc-resizer-corner:hover::after,

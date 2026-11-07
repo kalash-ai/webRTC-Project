@@ -68,14 +68,6 @@ export function ChatPanel(p: Props) {
   const sizeRef = useRef({ width: panelWidth, height: panelHeight });
   sizeRef.current = { width: panelWidth, height: panelHeight };
 
-  const resizeState = useRef<{
-    mode: 'left' | 'top' | 'corner';
-    startX: number;
-    startY: number;
-    startWidth: number;
-    startHeight: number;
-  } | null>(null);
-
   const showPanel = p.open && !p.minimized;
   const showPill = p.open && p.minimized;
   const myLabel = p.myName || 'Guest';
@@ -126,48 +118,51 @@ export function ChatPanel(p: Props) {
     const el = panelRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
-    resizeState.current = {
-      mode,
-      startX: e.clientX,
-      startY: e.clientY,
-      startWidth: rect.width,
-      startHeight: rect.height,
-    };
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+
     setIsResizing(true);
-    e.currentTarget.setPointerCapture(e.pointerId);
-  }
+    const cursor = mode === 'left' ? 'ew-resize' : mode === 'top' ? 'ns-resize' : 'nwse-resize';
+    document.body.style.cursor = cursor;
+    document.body.style.userSelect = 'none';
 
-  function onResizeMove(e: ReactPointerEvent) {
-    const s = resizeState.current;
-    if (!s) return;
-    e.preventDefault();
-
-    if (s.mode === 'left' || s.mode === 'corner') {
-      const dx = s.startX - e.clientX;
-      const maxW = Math.min(window.innerWidth - 32, 760);
-      const newW = Math.max(280, Math.min(maxW, Math.round(s.startWidth + dx)));
-      setPanelWidth(newW);
-      sizeRef.current.width = newW;
+    function onPointerMove(ev: PointerEvent) {
+      ev.preventDefault();
+      if (mode === 'left' || mode === 'corner') {
+        const dx = startX - ev.clientX;
+        const maxW = Math.min(window.innerWidth - 32, 760);
+        const newW = Math.max(280, Math.min(maxW, Math.round(startWidth + dx)));
+        setPanelWidth(newW);
+        sizeRef.current.width = newW;
+      }
+      if (mode === 'top' || mode === 'corner') {
+        const dy = startY - ev.clientY;
+        const maxH = window.innerHeight - 88;
+        const newH = Math.max(340, Math.min(maxH, Math.round(startHeight + dy)));
+        setPanelHeight(newH);
+        sizeRef.current.height = newH;
+      }
     }
 
-    if (s.mode === 'top' || s.mode === 'corner') {
-      const dy = s.startY - e.clientY;
-      const maxH = window.innerHeight - 88;
-      const newH = Math.max(340, Math.min(maxH, Math.round(s.startHeight + dy)));
-      setPanelHeight(newH);
-      sizeRef.current.height = newH;
+    function onPointerUp() {
+      setIsResizing(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      try {
+        localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(sizeRef.current));
+      } catch {
+        // Storage can be restricted
+      }
     }
-  }
 
-  function endResize() {
-    if (!resizeState.current) return;
-    resizeState.current = null;
-    setIsResizing(false);
-    try {
-      localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(sizeRef.current));
-    } catch {
-      // Storage can be restricted
-    }
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
   }
 
   function resetSize() {
@@ -217,9 +212,6 @@ export function ChatPanel(p: Props) {
           className="lc-resizer lc-resizer-left"
           title="Drag to resize width (double-click to reset)"
           onPointerDown={(e) => startResize(e, 'left')}
-          onPointerMove={onResizeMove}
-          onPointerUp={endResize}
-          onPointerCancel={endResize}
           onDoubleClick={resetSize}
         >
           <span className="lc-resizer-grip" />
@@ -228,18 +220,12 @@ export function ChatPanel(p: Props) {
           className="lc-resizer lc-resizer-top"
           title="Drag to resize height (double-click to reset)"
           onPointerDown={(e) => startResize(e, 'top')}
-          onPointerMove={onResizeMove}
-          onPointerUp={endResize}
-          onPointerCancel={endResize}
           onDoubleClick={resetSize}
         />
         <div
           className="lc-resizer lc-resizer-corner"
           title="Drag to resize width and height (double-click to reset)"
           onPointerDown={(e) => startResize(e, 'corner')}
-          onPointerMove={onResizeMove}
-          onPointerUp={endResize}
-          onPointerCancel={endResize}
           onDoubleClick={resetSize}
         />
 
