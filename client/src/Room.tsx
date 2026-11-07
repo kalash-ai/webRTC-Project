@@ -6,14 +6,15 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
+import { ChatPanel, type ChatMessage } from './chatPanel';
 import { Inspector } from './Inspector';
 import { useAdaptiveQuality } from './useAdaptiveQuality';
+import { useLinkInfo } from './useLinkInfo';
 import {
   ActivityIcon,
   CameraIcon,
   CameraOffIcon,
   ClockIcon,
-  CloseIcon,
   EditIcon,
   LinkIcon,
   LockIcon,
@@ -22,7 +23,6 @@ import {
   MicIcon,
   MicOffIcon,
   PhoneOffIcon,
-  SendIcon,
   SwapIcon,
   VideoIcon,
 } from './icons';
@@ -57,7 +57,6 @@ const STATUS_TEXT: Record<Status, string> = {
   error: 'Something went wrong',
 };
 
-type ChatMessage = { id: number; from: 'me' | 'them'; text: string; time: string };
 type PipRect = { left: number; top: number; width: number };
 type DragState = {
   mode: 'move' | 'resize';
@@ -137,8 +136,10 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
-  const chatEndRef = useRef<HTMLDivElement>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const typingSent = useRef(false);
+  const remoteTypingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const msgSeq = useRef(0);
 
@@ -165,11 +166,12 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const remoteNameRef = useRef('');
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [draft, setDraft] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatMin, setChatMin] = useState(false);
   const [chatReady, setChatReady] = useState(false);
   const [unread, setUnread] = useState(0);
-  const chatOpenRef = useRef(false);
+  const [remoteTyping, setRemoteTyping] = useState(false);
+  const chatVisibleRef = useRef(false);
 
   const [toast, setToast] = useState<string | null>(null);
   const [swapped, setSwapped] = useState(false);
@@ -178,6 +180,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const timer = useCallTimer(status === 'connected');
   const speaking = useSpeaking(remoteAudio);
   const quality = useAdaptiveQuality(statsPc, status === 'connected');
+  const link = useLinkInfo(statsPc, status === 'connected' && chatOpen && !chatMin);
 
   function showToast(text: string) {
     setToast(text);
@@ -209,11 +212,13 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
       }
     }
 
-    // ----- chat and names travel over a data channel, never through the server -----
+    // ----- chat, names and typing travel over a data channel, never through the server -----
     function resetChat() {
       channelRef.current = null;
       remoteNameRef.current = '';
+      if (remoteTypingTimer.current) clearTimeout(remoteTypingTimer.current);
       setRemoteName('');
+      setRemoteTyping(false);
       setMessages([]);
       setUnread(0);
       setChatReady(false);
@@ -231,6 +236,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
         if (channelRef.current === ch) {
           channelRef.current = null;
           setChatReady(false);
+          setRemoteTyping(false);
         }
       };
       ch.onmessage = (ev) => {
@@ -244,13 +250,21 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           const name = msg.name.trim().slice(0, 24);
           remoteNameRef.current = name;
           setRemoteName(name);
+        } else if (msg && msg.type === 'typing') {
+          if (remoteTypingTimer.current) clearTimeout(remoteTypingTimer.current);
+          setRemoteTyping(Boolean(msg.typing));
+          if (msg.typing) {
+            // Safety net: if the "stopped typing" message is lost, hide the dots anyway.
+            remoteTypingTimer.current = setTimeout(() => setRemoteTyping(false), 4000);
+          }
         } else if (msg && msg.type === 'chat' && typeof msg.text === 'string') {
           const text = msg.text.slice(0, 500);
+          setRemoteTyping(false);
           setMessages((prev) => [
             ...prev,
             { id: ++msgSeq.current, from: 'them', text, time: nowTime() },
           ]);
-          if (!chatOpenRef.current) setUnread((u) => u + 1);
+          if (!chatVisibleRef.current) setUnread((u) => u + 1);
         }
       };
     }
@@ -498,26 +512,30 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     };
   }, [roomId]);
 
+  // Messages count as unread unless the chat panel is open and not minimized.
+  useEffect(() => {
+    const visible = chatOpen && !chatMin;
+    chatVisibleRef.current = visible;
+    if (visible) setUnread(0);
+  }, [chatOpen, chatMin]);
+
   // Swapping only makes sense while both videos are showing.
   useEffect(() => {
     if (status !== 'connected') setSwapped(false);
   }, [status]);
 
-  // A resized window or fullscreen change puts the small video back in its corner.
+  // A resized window puts the small video back in its corner.
   useEffect(() => {
     const reset = () => setPip(null);
     window.addEventListener('resize', reset);
     return () => window.removeEventListener('resize', reset);
   }, []);
 
-  // Keep the newest chat message in view.
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages, chatOpen]);
-
   useEffect(
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
+      if (typingTimer.current) clearTimeout(typingTimer.current);
+      if (remoteTypingTimer.current) clearTimeout(remoteTypingTimer.current);
     },
     [],
   );
@@ -564,20 +582,46 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     setEditingName(false);
   }
 
+  // ----- chat actions -----
   function toggleChat() {
-    const next = !chatOpen;
-    setChatOpen(next);
-    chatOpenRef.current = next;
-    if (next) setUnread(0);
+    if (chatOpen && !chatMin) {
+      setChatOpen(false);
+    } else {
+      setChatOpen(true);
+      setChatMin(false);
+    }
   }
 
-  function sendChat() {
-    const text = draft.trim().slice(0, 500);
+  function stopTyping() {
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current = null;
+    if (!typingSent.current) return;
+    typingSent.current = false;
+    const ch = channelRef.current;
+    if (ch && ch.readyState === 'open') {
+      ch.send(JSON.stringify({ type: 'typing', typing: false }));
+    }
+  }
+
+  // Called while you type: tell the other person once, then say "stopped" after a pause.
+  function notifyTyping() {
+    const ch = channelRef.current;
+    if (!ch || ch.readyState !== 'open') return;
+    if (!typingSent.current) {
+      typingSent.current = true;
+      ch.send(JSON.stringify({ type: 'typing', typing: true }));
+    }
+    if (typingTimer.current) clearTimeout(typingTimer.current);
+    typingTimer.current = setTimeout(stopTyping, 2500);
+  }
+
+  function sendChat(raw: string) {
+    const text = raw.trim().slice(0, 500);
     const ch = channelRef.current;
     if (!text || !ch || ch.readyState !== 'open') return;
+    stopTyping();
     ch.send(JSON.stringify({ type: 'chat', text }));
     setMessages((prev) => [...prev, { id: ++msgSeq.current, from: 'me', text, time: nowTime() }]);
-    setDraft('');
   }
 
   // ----- the small video: drag to move, corner handle to resize -----
@@ -824,52 +868,25 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           </div>
         )}
 
-        {chatOpen && (
-          <div className="chat-panel">
-            <div className="chat-head">
-              <span>Chat</span>
-              <button className="chat-close" onClick={toggleChat} aria-label="Close chat">
-                <CloseIcon size={18} />
-              </button>
-            </div>
-            <div className="chat-list">
-              {messages.length === 0 && (
-                <p className="chat-empty">
-                  {chatReady ? 'No messages yet. Say hello.' : 'Chat starts when someone is connected.'}
-                </p>
-              )}
-              {messages.map((m) => (
-                <div key={m.id} className={`msg ${m.from === 'me' ? 'msg-me' : 'msg-them'}`}>
-                  <div className="msg-bubble">{m.text}</div>
-                  <span className="msg-time">
-                    {m.from === 'me' ? 'You' : remoteLabel} · {m.time}
-                  </span>
-                </div>
-              ))}
-              <div ref={chatEndRef} />
-            </div>
-            <div className="chat-input">
-              <input
-                value={draft}
-                maxLength={500}
-                disabled={!chatReady}
-                placeholder={chatReady ? 'Type a message' : 'Waiting for connection...'}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') sendChat();
-                }}
-              />
-              <button
-                className="chat-send"
-                onClick={sendChat}
-                disabled={!chatReady || !draft.trim()}
-                aria-label="Send message"
-              >
-                <SendIcon size={18} />
-              </button>
-            </div>
-          </div>
-        )}
+        <ChatPanel
+          open={chatOpen}
+          minimized={chatMin}
+          messages={messages}
+          remoteName={remoteLabel}
+          myName={myName}
+          chatReady={chatReady}
+          remoteTyping={remoteTyping}
+          unread={unread}
+          link={link}
+          onSend={sendChat}
+          onTyping={notifyTyping}
+          onMinimize={() => setChatMin(true)}
+          onExpand={() => setChatMin(false)}
+          onClose={() => {
+            setChatOpen(false);
+            setChatMin(false);
+          }}
+        />
       </div>
 
       <div className="controls">
@@ -892,7 +909,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           <span className="ctl-label">Camera</span>
         </button>
         <button
-          className={`ctl ${chatOpen ? 'is-on' : ''}`}
+          className={`ctl ${chatOpen && !chatMin ? 'is-on' : ''}`}
           onClick={toggleChat}
           disabled={status !== 'connected' && !chatOpen}
         >
