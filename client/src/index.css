@@ -1033,6 +1033,75 @@ button:disabled {
   transform: translateX(0);
   transition-delay: 0s;
 }
+.lc-panel.is-resizing {
+  transition: none !important;
+  user-select: none;
+}
+
+/* ---------- chat resizers ---------- */
+.lc-resizer {
+  position: absolute;
+  z-index: 12;
+  touch-action: none;
+  user-select: none;
+}
+.lc-resizer-left {
+  left: 0;
+  top: 18px;
+  bottom: 18px;
+  width: 12px;
+  cursor: ew-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.lc-resizer-grip {
+  width: 3px;
+  height: 38px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  transition: background 0.15s, transform 0.15s;
+}
+.lc-resizer-left:hover .lc-resizer-grip,
+.lc-panel.is-resizing .lc-resizer-grip {
+  background: var(--violet);
+  transform: scaleX(1.8);
+}
+.lc-resizer-top {
+  top: 0;
+  left: 24px;
+  right: 24px;
+  height: 10px;
+  cursor: ns-resize;
+}
+.lc-resizer-top:hover,
+.lc-panel.is-resizing .lc-resizer-top {
+  border-top: 2px solid var(--violet);
+}
+.lc-resizer-corner {
+  top: 0;
+  left: 0;
+  width: 24px;
+  height: 24px;
+  cursor: nwse-resize;
+  border-top-left-radius: 24px;
+}
+.lc-resizer-corner::after {
+  content: '';
+  position: absolute;
+  top: 7px;
+  left: 7px;
+  width: 9px;
+  height: 9px;
+  border-left: 2px solid rgba(255, 255, 255, 0.22);
+  border-top: 2px solid rgba(255, 255, 255, 0.22);
+  border-top-left-radius: 5px;
+  transition: border-color 0.15s;
+}
+.lc-resizer-corner:hover::after,
+.lc-panel.is-resizing .lc-resizer-corner::after {
+  border-color: var(--violet);
+}
 
 .lc-head {
   display: flex;
@@ -1449,8 +1518,12 @@ button:disabled {
     right: 12px;
     left: 12px;
     bottom: 190px;
-    width: auto;
+    width: auto !important;
+    height: auto !important;
     transform: translateY(30px);
+  }
+  .lc-resizer {
+    display: none !important;
   }
   .lc-panel.is-open {
     transform: none;

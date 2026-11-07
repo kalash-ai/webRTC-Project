@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   CheckIcon,
   ChevronUpIcon,
@@ -30,6 +30,20 @@ type Props = {
 };
 
 const EMOJIS = ['😀', '😂', '😊', '😍', '😎', '🤔', '👍', '👏', '🙏', '🎉', '🔥', '❤️', '😢', '😮', '👋', '✅'];
+const CHAT_SIZE_KEY = 'linkrtc-chat-size';
+
+function loadSavedSize(): { width: number | null; height: number | null } {
+  try {
+    const raw = localStorage.getItem(CHAT_SIZE_KEY);
+    if (!raw) return { width: null, height: null };
+    const parsed = JSON.parse(raw);
+    const width = typeof parsed.width === 'number' && parsed.width >= 280 && parsed.width <= 1200 ? parsed.width : null;
+    const height = typeof parsed.height === 'number' && parsed.height >= 340 && parsed.height <= 2000 ? parsed.height : null;
+    return { width, height };
+  } catch {
+    return { width: null, height: null };
+  }
+}
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -44,6 +58,23 @@ export function ChatPanel(p: Props) {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const listEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLElement | null>(null);
+
+  // Resizing state
+  const savedSize = useRef(loadSavedSize());
+  const [panelWidth, setPanelWidth] = useState<number | null>(() => savedSize.current.width);
+  const [panelHeight, setPanelHeight] = useState<number | null>(() => savedSize.current.height);
+  const [isResizing, setIsResizing] = useState(false);
+  const sizeRef = useRef({ width: panelWidth, height: panelHeight });
+  sizeRef.current = { width: panelWidth, height: panelHeight };
+
+  const resizeState = useRef<{
+    mode: 'left' | 'top' | 'corner';
+    startX: number;
+    startY: number;
+    startWidth: number;
+    startHeight: number;
+  } | null>(null);
 
   const showPanel = p.open && !p.minimized;
   const showPill = p.open && p.minimized;
@@ -69,6 +100,87 @@ export function ChatPanel(p: Props) {
     if (!showPanel) setEmojiOpen(false);
   }, [showPanel]);
 
+  // Clamp resized dimensions if the browser window shrinks.
+  useEffect(() => {
+    const onResize = () => {
+      if (window.innerWidth <= 640) return;
+      setPanelWidth((w) => {
+        if (w === null) return null;
+        const maxW = Math.min(window.innerWidth - 32, 760);
+        return w > maxW ? maxW : w;
+      });
+      setPanelHeight((h) => {
+        if (h === null) return null;
+        const maxH = window.innerHeight - 88;
+        return h > maxH ? maxH : h;
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  function startResize(e: ReactPointerEvent, mode: 'left' | 'top' | 'corner') {
+    if (window.innerWidth <= 640) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const el = panelRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    resizeState.current = {
+      mode,
+      startX: e.clientX,
+      startY: e.clientY,
+      startWidth: rect.width,
+      startHeight: rect.height,
+    };
+    setIsResizing(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function onResizeMove(e: ReactPointerEvent) {
+    const s = resizeState.current;
+    if (!s) return;
+    e.preventDefault();
+
+    if (s.mode === 'left' || s.mode === 'corner') {
+      const dx = s.startX - e.clientX;
+      const maxW = Math.min(window.innerWidth - 32, 760);
+      const newW = Math.max(280, Math.min(maxW, Math.round(s.startWidth + dx)));
+      setPanelWidth(newW);
+      sizeRef.current.width = newW;
+    }
+
+    if (s.mode === 'top' || s.mode === 'corner') {
+      const dy = s.startY - e.clientY;
+      const maxH = window.innerHeight - 88;
+      const newH = Math.max(340, Math.min(maxH, Math.round(s.startHeight + dy)));
+      setPanelHeight(newH);
+      sizeRef.current.height = newH;
+    }
+  }
+
+  function endResize() {
+    if (!resizeState.current) return;
+    resizeState.current = null;
+    setIsResizing(false);
+    try {
+      localStorage.setItem(CHAT_SIZE_KEY, JSON.stringify(sizeRef.current));
+    } catch {
+      // Storage can be restricted
+    }
+  }
+
+  function resetSize() {
+    setPanelWidth(null);
+    setPanelHeight(null);
+    sizeRef.current = { width: null, height: null };
+    try {
+      localStorage.removeItem(CHAT_SIZE_KEY);
+    } catch {
+      // Storage can be restricted
+    }
+  }
+
   function submit() {
     const text = draft.trim();
     if (!text || !p.chatReady) return;
@@ -84,9 +196,53 @@ export function ChatPanel(p: Props) {
     return 'Conversation minimized';
   }
 
+  const panelStyle: CSSProperties = {};
+  if (panelWidth !== null) panelStyle.width = `${panelWidth}px`;
+  if (panelHeight !== null) {
+    panelStyle.height = `${panelHeight}px`;
+    panelStyle.top = 'auto';
+  }
+
   return (
     <>
-      <aside className={`lc-panel ${showPanel ? 'is-open' : ''}`} aria-hidden={!showPanel} aria-label="Chat">
+      <aside
+        ref={panelRef}
+        className={`lc-panel ${showPanel ? 'is-open' : ''} ${isResizing ? 'is-resizing' : ''}`}
+        style={panelStyle}
+        aria-hidden={!showPanel}
+        aria-label="Chat"
+      >
+        {/* Resize Handles */}
+        <div
+          className="lc-resizer lc-resizer-left"
+          title="Drag to resize width (double-click to reset)"
+          onPointerDown={(e) => startResize(e, 'left')}
+          onPointerMove={onResizeMove}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={resetSize}
+        >
+          <span className="lc-resizer-grip" />
+        </div>
+        <div
+          className="lc-resizer lc-resizer-top"
+          title="Drag to resize height (double-click to reset)"
+          onPointerDown={(e) => startResize(e, 'top')}
+          onPointerMove={onResizeMove}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={resetSize}
+        />
+        <div
+          className="lc-resizer lc-resizer-corner"
+          title="Drag to resize width and height (double-click to reset)"
+          onPointerDown={(e) => startResize(e, 'corner')}
+          onPointerMove={onResizeMove}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={resetSize}
+        />
+
         <div className="lc-head">
           <div className="lc-avatar">{initials(p.remoteName)}</div>
           <div className="lc-who">
