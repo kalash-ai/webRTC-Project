@@ -6,7 +6,8 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
-import { ChatPanel, type ChatMessage } from './chatPanel';
+import {useFileTransfer} from './useFileTransfer';
+import { ChatPanel, type ChatMessage } from './ChatPanel';
 import { Inspector } from './Inspector';
 import { useAdaptiveQuality } from './useAdaptiveQuality';
 import { useLinkInfo } from './useLinkInfo';
@@ -26,6 +27,11 @@ import {
   SwapIcon,
   VideoIcon,
 } from './icons';
+
+
+
+
+
 
 const SIGNALING_URL: string = import.meta.env.VITE_SIGNALING_URL ?? 'ws://localhost:8080';
 const MAX_RECONNECT_ATTEMPTS = 8;
@@ -182,6 +188,24 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   const quality = useAdaptiveQuality(statsPc, status === 'connected');
   const link = useLinkInfo(statsPc, status === 'connected' && chatOpen && !chatMin);
 
+    const files = useFileTransfer({
+    channelRef,
+    onAdd: (file) =>
+      setMessages((prev) => [
+        ...prev,
+        { id: ++msgSeq.current, from: file.direction, text: '', time: nowTime(), file },
+      ]),
+    onUpdate: (transferId, patch) =>
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.file && m.file.transferId === transferId ? { ...m, file: { ...m.file, ...patch } } : m,
+        ),
+      ),
+    onIncoming: () => {
+      if (!chatVisibleRef.current) setUnread((u) => u + 1);
+    },
+  });
+  
   function showToast(text: string) {
     setToast(text);
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -214,6 +238,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
 
     // ----- chat, names and typing travel over a data channel, never through the server -----
     function resetChat() {
+            files.abortAll();
       channelRef.current = null;
       remoteNameRef.current = '';
       if (remoteTypingTimer.current) clearTimeout(remoteTypingTimer.current);
@@ -225,6 +250,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     }
 
     function setupChannel(ch: RTCDataChannel) {
+            ch.binaryType = 'arraybuffer';
       channelRef.current = ch;
       ch.onopen = () => {
         setChatReady(true);
@@ -232,14 +258,19 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           ch.send(JSON.stringify({ type: 'name', name: myNameRef.current }));
         }
       };
-      ch.onclose = () => {
+     
+
+        ch.onclose = () => {
+          files.abortAll();
         if (channelRef.current === ch) {
+
           channelRef.current = null;
           setChatReady(false);
           setRemoteTyping(false);
         }
       };
       ch.onmessage = (ev) => {
+                if (files.handleChannelMessage(ev.data)) return;
         let msg: any;
         try {
           msg = JSON.parse(ev.data);
@@ -616,6 +647,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
   }
 
   function sendChat(raw: string) {
+
     const text = raw.trim().slice(0, 500);
     const ch = channelRef.current;
     if (!text || !ch || ch.readyState !== 'open') return;
@@ -623,7 +655,8 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
     ch.send(JSON.stringify({ type: 'chat', text }));
     setMessages((prev) => [...prev, { id: ++msgSeq.current, from: 'me', text, time: nowTime() }]);
   }
-
+  
+  
   // ----- the small video: drag to move, corner handle to resize -----
   function startDrag(e: ReactPointerEvent, mode: 'move' | 'resize') {
     const stage = stageRef.current;
@@ -868,7 +901,7 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           </div>
         )}
 
-        <ChatPanel
+               <ChatPanel
           open={chatOpen}
           minimized={chatMin}
           messages={messages}
@@ -880,6 +913,8 @@ export function Room({ roomId, onLeave }: { roomId: string; onLeave: () => void 
           link={link}
           onSend={sendChat}
           onTyping={notifyTyping}
+          onSendFiles={files.sendFiles}
+          onCancelFile={files.cancel}
           onMinimize={() => setChatMin(true)}
           onExpand={() => setChatMin(false)}
           onClose={() => {
